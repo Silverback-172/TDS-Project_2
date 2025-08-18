@@ -1,7 +1,7 @@
 import os
 import re
-import sys
 import io
+import sys
 import json
 import time
 import base64
@@ -48,7 +48,7 @@ app = FastAPI(title="TDS Data Analyst Agent")
 # -----------------------------------------------------------------------------
 # Robust Gemini LLM with fallback
 # -----------------------------------------------------------------------------
-GEMINI_KEYS = [os.getenv(f"gemini_api_{i}") for i in range(1, 10 + 1)]
+GEMINI_KEYS = [os.getenv(f"gemini_api_{i}") for i in range(1, 11)]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 MODEL_HIERARCHY = [
@@ -239,15 +239,22 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 PNG_ONLY_HELPER = r'''
 def plot_to_base64(max_bytes=100000):
-    # Always return PNG; iteratively shrink to fit under max_bytes
+    # Clamp figure size in case code sets a huge figsize
+    try:
+        fig = plt.gcf()
+        w, h = fig.get_size_inches()
+        if (w * h) > 30:
+            fig.set_size_inches(6, 4)
+    except Exception:
+        pass
+    # Save PNG, iteratively reducing dpi to fit
     for dpi in [120, 100, 80, 60, 50, 40, 30, 25, 20, 15, 10]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
-        buf.seek(0)
         b = buf.getvalue()
         if len(b) <= max_bytes:
             return base64.b64encode(b).decode('ascii')
-    # Final tiny fallback
+    # Last-resort tiny image
     try:
         fig = plt.gcf()
         fig.set_size_inches(2, 1)
@@ -255,7 +262,6 @@ def plot_to_base64(max_bytes=100000):
         pass
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=10)
-    buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
 
@@ -465,11 +471,17 @@ def _auto_cast_numbers(d: dict) -> dict:
         if isinstance(v, str) and not is_image_key(k):
             s = v.strip()
             if INT_RE.fullmatch(s):
-                try: out[k] = int(s); continue
-                except: pass
+                try:
+                    out[k] = int(s)
+                    continue
+                except Exception:
+                    pass
             if NUM_RE.fullmatch(s):
-                try: out[k] = float(s); continue
-                except: pass
+                try:
+                    out[k] = float(s)
+                    continue
+                except Exception:
+                    pass
         out[k] = v
     return out
 
@@ -618,7 +630,7 @@ async def analyze_data(request: Request):
         else:
             df_preview = ""
 
-        # LLM rules (fixed quotes)
+        # LLM rules
         if dataset_uploaded:
             llm_rules = (
                 "Rules:\n"
