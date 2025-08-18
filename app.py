@@ -22,7 +22,7 @@ from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from dotenv import load_dotenv
 
-# Optional PIL (we use it to shrink images if available)
+# Optional PIL (used to shrink images if available)
 try:
     from PIL import Image
     PIL_AVAILABLE = True
@@ -618,7 +618,7 @@ async def analyze_data(request: Request):
         else:
             df_preview = ""
 
-        # LLM rules
+        # LLM rules (fixed quotes)
         if dataset_uploaded:
             llm_rules = (
                 "Rules:\n"
@@ -626,7 +626,7 @@ async def analyze_data(request: Request):
                 "2) DO NOT call scrape_url_to_dataframe() or fetch network data.\n"
                 "3) Return JSON with keys:\n"
                 '   - "questions": [ original questions exactly ]\n'
-                '   - "code": \"...\" (Python that fills `results` with the EXACT output keys requested)\n'
+                '   - "code": "..." (Python that fills `results` with the EXACT output keys requested)\n'
                 "4) For plots, produce **PNG** data URIs: 'data:image/png;base64,' + plot_to_base64().\n"
             )
         else:
@@ -635,7 +635,7 @@ async def analyze_data(request: Request):
                 "1) If you need web data, CALL scrape_url_to_dataframe(url).\n"
                 "2) Return JSON with keys:\n"
                 '   - "questions": [ original questions exactly ]\n'
-                '   - "code": \"...\" (Python that fills `results` with the EXACT output keys requested)\n"
+                '   - "code": "..." (Python that fills `results` with the EXACT output keys requested)\n'
                 "3) For plots, produce **PNG** data URIs: 'data:image/png;base64,' + plot_to_base64().\n"
             )
 
@@ -699,7 +699,6 @@ async def analyze_data(request: Request):
                         s = v if isinstance(v, str) else ""
                         if not s.startswith("data:image/"):
                             s = "data:image/png;base64," + re.sub(r"\s+", "", s)
-                        # decode & shrink if needed
                         raw = _decode_data_uri(s) or _FAVICON_FALLBACK_PNG
                         if len(raw) > MAX_IMAGE_BYTES:
                             raw = _shrink_png_bytes(raw)
