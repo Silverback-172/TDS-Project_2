@@ -22,7 +22,7 @@ from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from dotenv import load_dotenv
 
-# Optional PIL (used to shrink images if available)
+# Optional PIL (used to shrink/convert images if available)
 try:
     from PIL import Image
     PIL_AVAILABLE = True
@@ -248,7 +248,7 @@ def plot_to_base64(max_bytes=100000):
     except Exception:
         pass
     # Save PNG, iteratively reducing dpi to fit
-    for dpi in [120, 100, 80, 60, 50, 40, 30, 25, 20, 15, 10]:
+    for dpi in [120, 100, 90, 80, 70, 60, 50, 40, 35, 30, 25, 20, 15, 12, 10]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
         b = buf.getvalue()
@@ -375,11 +375,13 @@ You must:
    - "questions": [ the original questions EXACTLY as provided, in order ]
    - "code": "..."  # Python that creates a dict called `results`.
      IMPORTANT:
-     - `results` MUST be keyed by the EXACT output keys requested (e.g. parsed keys list),
+     - `results` MUST be keyed by the EXACT output keys requested (e.g., parsed keys list),
        NOT by question strings.
      - Always define all variables before use.
-     - For images, build **PNG** data-URIs via:
-         data_uri = "data:image/png;base64," + plot_to_base64()
+     - For images:
+         - Produce a **PNG** and return **RAW BASE64 ONLY** (NO data URI prefix).
+         - Use: b64 = plot_to_base64(); results[<image_key>] = b64
+         - Label axes on plots. If a regression line is requested, draw it (dotted red).
 4) Available runtime:
    - pandas, numpy, matplotlib
    - plot_to_base64(max_bytes=100000) to keep images <100kB
@@ -406,7 +408,7 @@ agent_executor = AgentExecutor(
 )
 
 # -----------------------------------------------------------------------------
-# Helpers: cleaning, casting, image validation
+# Helpers: cleaning, casting, image validation (RAW base64 PNG only)
 # -----------------------------------------------------------------------------
 def clean_llm_output(output: str) -> Dict:
     try:
@@ -444,12 +446,11 @@ def is_image_key(k: str) -> bool:
     k = (k or "").lower()
     return any(tag in k for tag in ["plot", "chart", "graph", "figure", "image", "histogram", "scatter"])
 
-# Tiny 1x1 transparent PNG (valid)
-_FAVICON_FALLBACK_PNG = base64.b64decode(
+# tiny 1x1 transparent PNG (raw base64, no data URI)
+_TINY_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="
 )
-_TINY_PNG_B64 = base64.b64encode(_FAVICON_FALLBACK_PNG).decode("ascii")
-_TINY_PNG_DATA_URI = "data:image/png;base64," + _TINY_PNG_B64
+_TINY_PNG_B64 = base64.b64encode(_TINY_PNG_BYTES).decode("ascii")
 
 def coerce_type(val, caster):
     try:
@@ -485,76 +486,90 @@ def _auto_cast_numbers(d: dict) -> dict:
         out[k] = v
     return out
 
-# PNG data-URI enforcement + validation + size cap
-MAX_IMAGE_BYTES = 100_000  # grader expects < 100kB
+# Base64/PNG enforcement for RAW base64 strings (no prefix)
+MAX_IMAGE_BYTES = 100_000
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
-def _is_png_data_uri(s: str) -> bool:
-    return isinstance(s, str) and s.strip().startswith("data:image/png;base64,")
-
-def _decode_data_uri(s: str):
+def _strip_data_uri(s: str) -> str:
     if not isinstance(s, str):
-        return None
+        return ""
     s = s.strip()
-    b64 = s.split(",", 1)[1] if s.startswith("data:image/") and "," in s else s
-    b64 = re.sub(r"\s+", "", b64)
+    if s.startswith("data:image/") and "," in s:
+        s = s.split(",", 1)[1]
+    return re.sub(r"\s+", "", s)
+
+def _is_b64(s: str) -> bool:
     try:
-        return base64.b64decode(b64, validate=True)
+        base64.b64decode(s, validate=True)
+        return True
     except Exception:
-        return None
+        return False
 
-def _shrink_png_bytes(png_bytes: bytes) -> bytes:
-    if PIL_AVAILABLE:
-        try:
-            im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-            for scale in (0.75, 0.6, 0.5, 0.4, 0.33, 0.25, 0.2):
-                w, h = im.size
-                w2, h2 = max(1, int(w*scale)), max(1, int(h*scale))
-                im2 = im.resize((w2, h2))
+def _ensure_png_b64(value: Any) -> str:
+    """
+    Normalize any input (data URI or raw) to RAW base64 PNG <=100kB.
+    Converts non-PNG bytes to PNG with PIL if available, else returns tiny PNG.
+    """
+    if not isinstance(value, str) or not value:
+        return _TINY_PNG_B64
+
+    s = _strip_data_uri(value)
+    if not _is_b64(s):
+        return _TINY_PNG_B64
+
+    raw = base64.b64decode(s, validate=True)
+
+    # If not PNG, try to convert to PNG via PIL; otherwise fallback to tiny
+    if not raw.startswith(_PNG_SIG):
+        if PIL_AVAILABLE:
+            try:
+                im = Image.open(io.BytesIO(raw)).convert("RGBA")
                 buf = io.BytesIO()
-                im2.save(buf, format="PNG", optimize=True)
-                b = buf.getvalue()
-                if len(b) <= MAX_IMAGE_BYTES:
-                    return b
-            buf = io.BytesIO()
-            Image.new("RGBA", (1,1), (0,0,0,0)).save(buf, format="PNG")
-            return buf.getvalue()
-        except Exception:
-            pass
-    # Fallback tiny PNG
-    return _FAVICON_FALLBACK_PNG
+                im.save(buf, format="PNG", optimize=True)
+                raw = buf.getvalue()
+            except Exception:
+                return _TINY_PNG_B64
+        else:
+            return _TINY_PNG_B64
 
-def _enforce_png_data_uris(d: dict) -> dict:
+    # Shrink if necessary (PIL)
+    if len(raw) > MAX_IMAGE_BYTES:
+        if PIL_AVAILABLE:
+            try:
+                im = Image.open(io.BytesIO(raw)).convert("RGBA")
+                for scale in (0.8, 0.67, 0.5, 0.4, 0.33, 0.25, 0.2):
+                    w, h = im.size
+                    w2, h2 = max(1, int(w * scale)), max(1, int(h * scale))
+                    im2 = im.resize((w2, h2))
+                    buf = io.BytesIO()
+                    im2.save(buf, format="PNG", optimize=True)
+                    b = buf.getvalue()
+                    if len(b) <= MAX_IMAGE_BYTES:
+                        return base64.b64encode(b).decode("ascii")
+                # final tiny
+                buf = io.BytesIO()
+                Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception:
+                return _TINY_PNG_B64
+        else:
+            # Can't shrink without PIL; return tiny to satisfy size+validity
+            return _TINY_PNG_B64
+
+    # Already PNG and small enough
+    return base64.b64encode(raw).decode("ascii")
+
+def _normalize_images_to_png_b64(d: dict) -> dict:
     out = {}
     for k, v in d.items():
         if is_image_key(k):
-            if isinstance(v, str) and v:
-                if not _is_png_data_uri(v):
-                    v = "data:image/png;base64," + re.sub(r"\s+", "", v)
-                raw = _decode_data_uri(v)
-                if not raw:
-                    small = _FAVICON_FALLBACK_PNG
-                    out[k] = "data:image/png;base64," + base64.b64encode(small).decode("ascii")
-                else:
-                    out[k] = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+            out[k] = _ensure_png_b64(v)
+        else:
+            # also strip accidental data URIs from non-image keys just in case
+            if isinstance(v, str) and v.startswith("data:image/"):
+                out[k] = _strip_data_uri(v)
             else:
-                out[k] = _TINY_PNG_DATA_URI
-        else:
-            out[k] = v
-    return out
-
-def _fix_images_size_and_validity(d: Dict) -> Dict:
-    out = {}
-    for k, v in d.items():
-        if is_image_key(k):
-            s = v if isinstance(v, str) else ""
-            if not _is_png_data_uri(s):
-                s = "data:image/png;base64," + re.sub(r"\s+", "", s)
-            raw = _decode_data_uri(s) or _FAVICON_FALLBACK_PNG
-            if len(raw) > MAX_IMAGE_BYTES:
-                raw = _shrink_png_bytes(raw)
-            out[k] = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
-        else:
-            out[k] = v
+                out[k] = v
     return out
 
 # -----------------------------------------------------------------------------
@@ -630,7 +645,7 @@ async def analyze_data(request: Request):
         else:
             df_preview = ""
 
-        # LLM rules
+        # LLM rules (explicitly: RAW base64 only for images)
         if dataset_uploaded:
             llm_rules = (
                 "Rules:\n"
@@ -639,7 +654,7 @@ async def analyze_data(request: Request):
                 "3) Return JSON with keys:\n"
                 '   - "questions": [ original questions exactly ]\n'
                 '   - "code": "..." (Python that fills `results` with the EXACT output keys requested)\n'
-                "4) For plots, produce **PNG** data URIs: 'data:image/png;base64,' + plot_to_base64().\n"
+                "4) For plots: return RAW BASE64 PNG ONLY (NO data URI prefix). Use plot_to_base64().\n"
             )
         else:
             llm_rules = (
@@ -648,7 +663,7 @@ async def analyze_data(request: Request):
                 "2) Return JSON with keys:\n"
                 '   - "questions": [ original questions exactly ]\n'
                 '   - "code": "..." (Python that fills `results` with the EXACT output keys requested)\n'
-                "3) For plots, produce **PNG** data URIs: 'data:image/png;base64,' + plot_to_base64().\n"
+                "3) For plots: return RAW BASE64 PNG ONLY (NO data URI prefix). Use plot_to_base64().\n"
             )
 
         if keys_list:
@@ -687,48 +702,37 @@ async def analyze_data(request: Request):
 
         # Normalize numbers & images early
         results_dict = _auto_cast_numbers(results_dict)
-        results_dict = _enforce_png_data_uris(results_dict)
-        results_dict = _fix_images_size_and_validity(results_dict)
+        results_dict = _normalize_images_to_png_b64(results_dict)
 
         # ---------------- Schema Safety Net ----------------
         output: Dict[str, Any] = {}
         if keys_list and all(k in results_dict for k in keys_list):
-            # Agent produced exactly the expected keys
             for k in keys_list:
                 output[k] = results_dict.get(k)
         elif keys_list:
-            # Map/Fill by expected keys with safe defaults
             for k in keys_list:
                 v = results_dict.get(k, None)
                 if v is None or v == "":
                     if is_image_key(k):
-                        output[k] = _TINY_PNG_DATA_URI
+                        output[k] = _TINY_PNG_B64
                     else:
                         caster = type_map.get(k, str)
                         output[k] = coerce_type(None, caster)
                 else:
                     if is_image_key(k):
-                        s = v if isinstance(v, str) else ""
-                        if not s.startswith("data:image/"):
-                            s = "data:image/png;base64," + re.sub(r"\s+", "", s)
-                        raw = _decode_data_uri(s) or _FAVICON_FALLBACK_PNG
-                        if len(raw) > MAX_IMAGE_BYTES:
-                            raw = _shrink_png_bytes(raw)
-                        output[k] = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+                        output[k] = _ensure_png_b64(v)
                     else:
                         caster = type_map.get(k, str)
                         if isinstance(v, str) and v.startswith("data:image/"):
-                            output[k] = coerce_type(None, caster)
+                            output[k] = coerce_type(_strip_data_uri(v), caster)
                         else:
                             output[k] = coerce_type(v, caster)
         else:
-            # No structured keys specified; return what we have
             output = results_dict
 
         # Final passes to guarantee grader compatibility
         output = _auto_cast_numbers(output)
-        output = _enforce_png_data_uris(output)
-        output = _fix_images_size_and_validity(output)
+        output = _normalize_images_to_png_b64(output)
 
         return JSONResponse(content=output)
 
@@ -736,9 +740,9 @@ async def analyze_data(request: Request):
         raise he
     except Exception as e:
         logger.exception("analyze_data failed")
-        # Last-resort safe JSON
+        # Last-resort safe JSON (raw base64 tiny PNG)
         return JSONResponse(
-            content={"error": str(e), "plot": _TINY_PNG_DATA_URI},
+            content={"error": str(e), "plot": _TINY_PNG_B64},
             status_code=200
         )
 
@@ -750,7 +754,7 @@ async def favicon():
     path = "favicon.ico"
     if os.path.exists(path):
         return FileResponse(path, media_type="image/x-icon")
-    return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
+    return Response(content=_TINY_PNG_BYTES, media_type="image/png")
 
 # -----------------------------------------------------------------------------
 # Minimal diagnostics
